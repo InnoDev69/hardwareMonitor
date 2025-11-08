@@ -186,4 +186,5 @@ def main():
         print(f"Error: {e}")
 
 if __name__ == "__main__":
+    print("INICIANDO")
     main()

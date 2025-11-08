@@ -1,4 +1,5 @@
 venv
+logs/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -139,3 +140,4 @@ hardwareMonitor-*
 # Archivos de prueba
 test_*.txt
 .test_mode
+hardwareMonitor
