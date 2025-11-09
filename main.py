@@ -10,6 +10,8 @@ import platform
 import sys
 import shutil
 from dotenv import load_dotenv
+import sqlite3
+import gzip
 
 # Cargar variables de entorno
 load_dotenv()
@@ -18,7 +20,9 @@ load_dotenv()
 CONFIG = {
     "github_repo": "InnoDev69/hardwareMonitor",
     "log_file": "logs/hardware_metrics.txt",
-    "check_updates_interval": 3600,
+    "db_file": "logs/hardware_metrics.db",  # ← AGREGAR
+    "log_compression": True,  # ← AGREGAR
+    "check_updates_interval": 86400,
     "metrics_interval": 5,
     "update_timeout": 30,
     "debug": True,
@@ -31,6 +35,33 @@ class HardwareMonitor:
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
         self.running = True
         
+        # Inicializar base de datos
+        self.db_file = Path(CONFIG["db_file"])
+        self.init_database()
+    
+    def init_database(self):  # ← NUEVA FUNCIÓN
+        """Crea la base de datos SQLite"""
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT UNIQUE,
+                cpu_percent REAL,
+                cpu_freq REAL,
+                memory_percent REAL,
+                memory_used_gb REAL,
+                memory_total_gb REAL,
+                disk_percent REAL,
+                disk_used_gb REAL,
+                disk_total_gb REAL,
+                temperature TEXT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON metrics(timestamp)')
+        conn.commit()
+        conn.close()
+    
     def get_hardware_metrics(self):
         """Obtiene métricas esenciales del hardware"""
         metrics = {
@@ -61,22 +92,64 @@ class HardwareMonitor:
             if temps:
                 for name, entries in temps.items():
                     if entries:
-                        return {name: entries[0].current}
-            return {}
+                        return json.dumps({name: entries[0].current})
+            return None
         except:
-            return {}
+            return None
+    
+    def write_metrics_to_db(self):  # ← NUEVA FUNCIÓN
+        """Guarda métricas en SQLite"""
+        metrics = self.get_hardware_metrics()
+        
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO metrics VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                metrics['timestamp'],
+                metrics['cpu']['percent'],
+                metrics['cpu']['freq'],
+                metrics['memory']['percent'],
+                metrics['memory']['used_gb'],
+                metrics['memory']['total_gb'],
+                metrics['disk']['percent'],
+                metrics['disk']['used_gb'],
+                metrics['disk']['total_gb'],
+                metrics['temperature']
+            ))
+            
+            conn.commit()
+            conn.close()
+        except sqlite3.IntegrityError:
+            pass  # Ignorar duplicados por timestamp
+        except Exception as e:
+            if CONFIG["debug"]:
+                print(f"[ERROR] DB: {e}")
     
     def write_metrics(self):
-        """Escribe las métricas en el archivo txt"""
+        """Escribe las métricas (TXT + DB)"""
+        # Guardar en base de datos (más eficiente)
+        self.write_metrics_to_db()
+        
+        # Opcionalmente guardar también en TXT comprimido
+        if CONFIG["log_compression"]:
+            self.write_metrics_compressed()
+    
+    def write_metrics_compressed(self):  # ← NUEVA FUNCIÓN
+        """Escribe métricas en JSON comprimido"""
         metrics = self.get_hardware_metrics()
-        with open(self.log_file, 'a', encoding='utf-8') as f:
-            f.write(f"\n{'='*60}\n")
-            f.write(f"Timestamp: {metrics['timestamp']}\n")
-            f.write(f"CPU: {metrics['cpu']['percent']}% | {metrics['cpu']['freq']:.0f} MHz\n")
-            f.write(f"RAM: {metrics['memory']['percent']}% ({metrics['memory']['used_gb']:.2f}GB / {metrics['memory']['total_gb']:.2f}GB)\n")
-            f.write(f"DISK: {metrics['disk']['percent']}% ({metrics['disk']['used_gb']:.2f}GB / {metrics['disk']['total_gb']:.2f}GB)\n")
-            if metrics['temperature']:
-                f.write(f"Temperatura: {metrics['temperature']}\n")
+        json_data = json.dumps(metrics, ensure_ascii=False)
+        
+        log_gz = self.log_file.with_suffix('.jsonl.gz')
+        
+        try:
+            with gzip.open(log_gz, 'at', encoding='utf-8') as f:
+                f.write(json_data + '\n')
+        except Exception as e:
+            if CONFIG["debug"]:
+                print(f"[ERROR] Compresión: {e}")
 
 class GitUpdater:
     def __init__(self, repo):
@@ -279,6 +352,26 @@ class GitUpdater:
         except Exception as e:
             self.debug_print(f"❌ Error al descargar: {type(e).__name__}: {e}")
 
+def get_db_size_stats():  # ← NUEVA FUNCIÓN
+    """Muestra estadísticas de tamaño de la base de datos"""
+    db_file = Path(CONFIG["db_file"])
+    if db_file.exists():
+        size_mb = db_file.stat().st_size / (1024**2)
+        
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM metrics")
+        rows = cursor.fetchone()[0]
+        conn.close()
+        
+        bytes_per_row = (size_mb * 1024 * 1024) / rows if rows > 0 else 0
+        
+        print(f"\n📊 Estadísticas de BD:")
+        print(f"   Tamaño: {size_mb:.2f} MB")
+        print(f"   Registros: {rows:,}")
+        print(f"   Bytes/registro: {bytes_per_row:.1f}")
+        print(f"   Proyección/mes: {(size_mb/24):.2f} MB (si corre 24h)\n")
+
 def main():
     """Función principal"""
     monitor = HardwareMonitor()
@@ -289,8 +382,9 @@ def main():
     print("="*60)
     print(f"Sistema: {updater.system}")
     print(f"Versión: {updater.current_version}")
-    print(f"Guardando en: {monitor.log_file}")
-    print(f"Log de updates: {updater.update_log}")
+    print(f"BD SQLite: {monitor.db_file}")
+    if CONFIG["log_compression"]:
+        print(f"JSON comprimido: {monitor.log_file.with_suffix('.jsonl.gz')}")
     print("="*60 + "\n")
     
     last_update_check = 0
@@ -304,6 +398,7 @@ def main():
             if current_time - last_update_check > CONFIG["check_updates_interval"]:
                 print("\n[UPDATE] Verificando actualizaciones...")
                 updater.check_for_updates()
+                get_db_size_stats()
                 print()
                 last_update_check = current_time
             
@@ -311,6 +406,7 @@ def main():
     
     except KeyboardInterrupt:
         print("\n✓ Monitor detenido.")
+        get_db_size_stats()
     except Exception as e:
         print(f"❌ Error: {e}")
 
