@@ -12,6 +12,8 @@ import shutil
 from dotenv import load_dotenv
 import sqlite3
 import gzip
+import threading
+from flask import Flask, render_template, jsonify
 
 # Cargar variables de entorno
 load_dotenv()
@@ -20,13 +22,16 @@ load_dotenv()
 CONFIG = {
     "github_repo": "InnoDev69/hardwareMonitor",
     "log_file": "logs/hardware_metrics.txt",
-    "db_file": "logs/hardware_metrics.db",  # ← AGREGAR
-    "log_compression": True,  # ← AGREGAR
+    "db_file": "logs/hardware_metrics.db",
+    "log_compression": True,
     "check_updates_interval": 86400,
     "metrics_interval": 5,
     "update_timeout": 30,
     "debug": True,
-    "github_token": os.getenv("GITHUB_TOKEN", "")
+    "github_token": os.getenv("GITHUB_TOKEN", ""),
+    "flask_host": "0.0.0.0",
+    "flask_port": 4000,
+    "flask_debug": False
 }
 
 class HardwareMonitor:
@@ -39,66 +44,195 @@ class HardwareMonitor:
         self.db_file = Path(CONFIG["db_file"])
         self.init_database()
     
-    def init_database(self):  # ← NUEVA FUNCIÓN
-        """Crea la base de datos SQLite"""
+    def init_database(self):
+        """Crea la base de datos SQLite con todas las métricas"""
         conn = sqlite3.connect(self.db_file)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT UNIQUE,
+                
                 cpu_percent REAL,
                 cpu_freq REAL,
+                cpu_count INTEGER,
+                cpu_temp REAL,
+                
                 memory_percent REAL,
                 memory_used_gb REAL,
                 memory_total_gb REAL,
+                memory_available_gb REAL,
+                
                 disk_percent REAL,
                 disk_used_gb REAL,
                 disk_total_gb REAL,
-                temperature TEXT
+                disk_free_gb REAL,
+                disk_read_count INTEGER,
+                disk_write_count INTEGER,
+                disk_read_bytes REAL,
+                disk_write_bytes REAL,
+                
+                temp_cpu REAL,
+                temp_gpu REAL,
+                temp_ssd REAL,
+                temp_hdd REAL,
+                temperatures TEXT,
+                
+                network_bytes_sent REAL,
+                network_bytes_recv REAL,
+                network_packets_sent INTEGER,
+                network_packets_recv INTEGER,
+                
+                processes_count INTEGER,
+                threads_count INTEGER
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON metrics(timestamp)')
         conn.commit()
         conn.close()
     
+    def get_disk_info(self):
+        """Obtiene información detallada de discos"""
+        try:
+            disk_usage = psutil.disk_usage('/')
+            disk_io = psutil.disk_io_counters()
+            
+            return {
+                "percent": disk_usage.percent,
+                "used_gb": disk_usage.used / (1024**3),
+                "total_gb": disk_usage.total / (1024**3),
+                "free_gb": disk_usage.free / (1024**3),
+                "read_count": disk_io.read_count if disk_io else 0,
+                "write_count": disk_io.write_count if disk_io else 0,
+                "read_bytes": (disk_io.read_bytes / (1024**3)) if disk_io else 0,
+                "write_bytes": (disk_io.write_bytes / (1024**3)) if disk_io else 0
+            }
+        except Exception as e:
+            if CONFIG["debug"]:
+                print(f"[ERROR] Disk info: {e}")
+            return {}
+    
+    def get_all_temperatures(self):
+        """Obtiene temperaturas de TODOS los componentes críticos"""
+        temps = {
+            "cpu": None,
+            "gpu": None,
+            "ssd": None,
+            "hdd": None,
+            "all": {}
+        }
+        
+        try:
+            temps_data = psutil.sensors_temperatures()
+            
+            if not temps_data:
+                return temps
+            
+            # Mapeo de nombres comunes de sensores
+            for sensor_name, sensor_list in temps_data.items():
+                sensor_name_lower = sensor_name.lower()
+                
+                if sensor_list:
+                    temp_value = sensor_list[0].current
+                    temps["all"][sensor_name] = temp_value
+                    
+                    # Clasificar por tipo
+                    if any(x in sensor_name_lower for x in ["cpu", "core", "package"]):
+                        if temps["cpu"] is None:
+                            temps["cpu"] = temp_value
+                    
+                    elif any(x in sensor_name_lower for x in ["gpu", "nvidia", "amd", "radeon"]):
+                        if temps["gpu"] is None:
+                            temps["gpu"] = temp_value
+                    
+                    elif any(x in sensor_name_lower for x in ["nvme", "ssd", "m.2", "ata0", "ata1"]):
+                        if temps["ssd"] is None:
+                            temps["ssd"] = temp_value
+                    
+                    elif any(x in sensor_name_lower for x in ["hdd", "disk", "ata", "sata"]):
+                        if temps["hdd"] is None:
+                            temps["hdd"] = temp_value
+        
+        except Exception as e:
+            if CONFIG["debug"]:
+                print(f"[ERROR] Temperature sensors: {e}")
+        
+        return temps
+    
+    def get_network_info(self):
+        """Obtiene información de red"""
+        try:
+            net_io = psutil.net_io_counters()
+            return {
+                "bytes_sent": net_io.bytes_sent / (1024**3),
+                "bytes_recv": net_io.bytes_recv / (1024**3),
+                "packets_sent": net_io.packets_sent,
+                "packets_recv": net_io.packets_recv
+            }
+        except Exception as e:
+            if CONFIG["debug"]:
+                print(f"[ERROR] Network info: {e}")
+            return {}
+    
+    def get_process_info(self):
+        """Obtiene información de procesos"""
+        try:
+            return {
+                "processes": len(psutil.pids()),
+                "threads": threading.active_count()
+            }
+        except Exception as e:
+            if CONFIG["debug"]:
+                print(f"[ERROR] Process info: {e}")
+            return {}
+    
     def get_hardware_metrics(self):
-        """Obtiene métricas esenciales del hardware"""
+        """Obtiene métricas completas del hardware"""
+        
+        # CPU
+        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_freq = psutil.cpu_freq().current if psutil.cpu_freq() else 0
+        cpu_count = psutil.cpu_count()
+        
+        # Memoria
+        mem = psutil.virtual_memory()
+        
+        # Temperaturas
+        temps = self.get_all_temperatures()
+        
+        # Disco
+        disk_info = self.get_disk_info()
+        
+        # Red
+        net_info = self.get_network_info()
+        
+        # Procesos
+        proc_info = self.get_process_info()
+        
         metrics = {
             "timestamp": datetime.now().isoformat(),
             "cpu": {
-                "percent": psutil.cpu_percent(interval=1),
-                "count": psutil.cpu_count(),
-                "freq": psutil.cpu_freq().current if psutil.cpu_freq() else 0
+                "percent": cpu_percent,
+                "freq": cpu_freq,
+                "count": cpu_count,
+                "temp": temps["cpu"]
             },
             "memory": {
-                "percent": psutil.virtual_memory().percent,
-                "used_gb": psutil.virtual_memory().used / (1024**3),
-                "total_gb": psutil.virtual_memory().total / (1024**3)
+                "percent": mem.percent,
+                "used_gb": mem.used / (1024**3),
+                "total_gb": mem.total / (1024**3),
+                "available_gb": mem.available / (1024**3)
             },
-            "disk": {
-                "percent": psutil.disk_usage('/').percent,
-                "used_gb": psutil.disk_usage('/').used / (1024**3),
-                "total_gb": psutil.disk_usage('/').total / (1024**3)
-            },
-            "temperature": self.get_temperature()
+            "disk": disk_info,
+            "temperatures": temps,
+            "network": net_info,
+            "processes": proc_info
         }
+        
         return metrics
     
-    def get_temperature(self):
-        """Obtiene temperatura si está disponible"""
-        try:
-            temps = psutil.sensors_temperatures()
-            if temps:
-                for name, entries in temps.items():
-                    if entries:
-                        return json.dumps({name: entries[0].current})
-            return None
-        except:
-            return None
-    
-    def write_metrics_to_db(self):  # ← NUEVA FUNCIÓN
-        """Guarda métricas en SQLite"""
+    def write_metrics_to_db(self):
+        """Guarda métricas completas en SQLite"""
         metrics = self.get_hardware_metrics()
         
         try:
@@ -106,38 +240,68 @@ class HardwareMonitor:
             cursor = conn.cursor()
             
             cursor.execute('''
-                INSERT INTO metrics VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO metrics VALUES (
+                    NULL, ?, 
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?
+                )
             ''', (
                 metrics['timestamp'],
+                
                 metrics['cpu']['percent'],
                 metrics['cpu']['freq'],
+                metrics['cpu']['count'],
+                metrics['cpu']['temp'],
+                
                 metrics['memory']['percent'],
                 metrics['memory']['used_gb'],
                 metrics['memory']['total_gb'],
-                metrics['disk']['percent'],
-                metrics['disk']['used_gb'],
-                metrics['disk']['total_gb'],
-                metrics['temperature']
+                metrics['memory']['available_gb'],
+                
+                metrics['disk'].get('percent', 0),
+                metrics['disk'].get('used_gb', 0),
+                metrics['disk'].get('total_gb', 0),
+                metrics['disk'].get('free_gb', 0),
+                metrics['disk'].get('read_count', 0),
+                metrics['disk'].get('write_count', 0),
+                metrics['disk'].get('read_bytes', 0),
+                metrics['disk'].get('write_bytes', 0),
+                
+                metrics['temperatures']['cpu'],
+                metrics['temperatures']['gpu'],
+                metrics['temperatures']['ssd'],
+                metrics['temperatures']['hdd'],
+                json.dumps(metrics['temperatures']['all'], ensure_ascii=False),
+                
+                metrics['network'].get('bytes_sent', 0),
+                metrics['network'].get('bytes_recv', 0),
+                metrics['network'].get('packets_sent', 0),
+                metrics['network'].get('packets_recv', 0),
+                
+                metrics['processes'].get('processes', 0),
+                metrics['processes'].get('threads', 0)
             ))
             
             conn.commit()
             conn.close()
         except sqlite3.IntegrityError:
-            pass  # Ignorar duplicados por timestamp
+            pass
         except Exception as e:
             if CONFIG["debug"]:
                 print(f"[ERROR] DB: {e}")
     
     def write_metrics(self):
-        """Escribe las métricas (TXT + DB)"""
-        # Guardar en base de datos (más eficiente)
+        """Escribe las métricas (DB + Comprimido)"""
         self.write_metrics_to_db()
         
-        # Opcionalmente guardar también en TXT comprimido
         if CONFIG["log_compression"]:
             self.write_metrics_compressed()
     
-    def write_metrics_compressed(self):  # ← NUEVA FUNCIÓN
+    def write_metrics_compressed(self):
         """Escribe métricas en JSON comprimido"""
         metrics = self.get_hardware_metrics()
         json_data = json.dumps(metrics, ensure_ascii=False)
@@ -160,44 +324,38 @@ class GitUpdater:
         self.current_executable = self.get_current_executable_path()
         self.update_log = Path("logs/update_log.txt")
         self.update_log.parent.mkdir(parents=True, exist_ok=True)
-        self.temp_update_file = f"{self.executable_name}.update"  # ← AGREGAR
+        self.temp_update_file = f"{self.executable_name}.update"
         
-        # Headers CON TOKEN
         self.headers = {
             'User-Agent': 'hardwareMonitor-updater/1.0',
             'Accept': 'application/vnd.github.v3+json'
         }
         
-        # Agregar token si existe
         if CONFIG["github_token"]:
             self.headers['Authorization'] = f'token {CONFIG["github_token"]}'
             self.debug_print(f"✓ Token de GitHub configurado (últimos 4 caracteres: ...{CONFIG['github_token'][-4:]})")
         else:
             self.debug_print("⚠️  Sin token: rate limit de 60 requests/hora")
         
-        # Verificar si hay actualización pendiente
-        self.check_pending_update()  # ← AGREGAR
+        self.check_pending_update()
         
         self.debug_print(f"Sistema: {self.system}")
         self.debug_print(f"Versión local: {self.current_version}")
         self.debug_print(f"Ejecutable actual: {self.current_executable}")
         self.debug_print(f"Nombre esperado: {self.executable_name}")
     
-    def check_pending_update(self):  # ← NUEVA FUNCIÓN
+    def check_pending_update(self):
         """Verifica si hay una actualización pendiente desde la ejecución anterior"""
         if os.path.exists(self.temp_update_file):
             self.debug_print(f"✓ Actualización pendiente encontrada: {self.temp_update_file}")
             try:
-                # Hacer backup del actual
                 backup_name = f"{self.executable_name}.backup"
                 if os.path.exists(self.executable_name):
                     shutil.move(self.executable_name, backup_name)
                     self.debug_print(f"💾 Backup del ejecutable anterior: {backup_name}")
                 
-                # Reemplazar con la nueva versión
                 shutil.move(self.temp_update_file, self.executable_name)
                 
-                # Hacer ejecutable en Linux/macOS
                 if self.system in ["Linux", "Darwin"]:
                     os.chmod(self.executable_name, 0o755)
                 
@@ -332,7 +490,6 @@ class GitUpdater:
             self.debug_print(f"Respuesta: {response.status_code}")
             
             if response.status_code == 200:
-                # Descargar a archivo temporal
                 with open(self.temp_update_file, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
@@ -340,7 +497,6 @@ class GitUpdater:
                 self.debug_print(f"✅ Descarga completada en: {self.temp_update_file}")
                 self.debug_print(f"⚠️  La actualización se aplicará al reiniciar el programa")
                 
-                # Actualizar version.txt para la próxima ejecución
                 with open("version.txt", "w") as f:
                     f.write(version)
                 
@@ -352,7 +508,141 @@ class GitUpdater:
         except Exception as e:
             self.debug_print(f"❌ Error al descargar: {type(e).__name__}: {e}")
 
-def get_db_size_stats():  # ← NUEVA FUNCIÓN
+# ════════════════════════════════════════════════════════════════
+# FLASK DASHBOARD
+# ════════════════════════════════════════════════════════════════
+
+class DashboardServer:
+    def __init__(self, db_file):
+        self.db_file = db_file
+        self.app = Flask(__name__, template_folder='templates', static_folder='static')
+        self.setup_routes()
+    
+    def get_db_connection(self):
+        """Crea una conexión a la BD"""
+        conn = sqlite3.connect(self.db_file)
+        conn.row_factory = sqlite3.Row
+        return conn
+    
+    def setup_routes(self):
+        """Configura las rutas de Flask"""
+        
+        @self.app.route('/')
+        def index():
+            return render_template('dashboard.html')
+        
+        @self.app.route('/api/latest')
+        def api_latest():
+            """Últimas 100 métricas para gráficos"""
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT timestamp, cpu_percent, memory_percent, disk_percent,
+                       temp_cpu, temp_gpu, temp_ssd, temp_hdd,
+                       network_bytes_sent, network_bytes_recv, processes_count
+                FROM metrics ORDER BY timestamp DESC LIMIT 100
+            ''')
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            data = [dict(row) for row in reversed(rows)]
+            return jsonify(data)
+        
+        @self.app.route('/api/stats')
+        def api_stats():
+            """Estadísticas generales"""
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT 
+                    COUNT(*) as total_registros,
+                    AVG(cpu_percent) as cpu_promedio,
+                    MAX(cpu_percent) as cpu_maximo,
+                    AVG(memory_percent) as ram_promedio,
+                    MAX(memory_percent) as ram_maximo,
+                    AVG(disk_percent) as disk_promedio,
+                    MAX(disk_percent) as disk_maximo,
+                    AVG(temp_cpu) as temp_cpu_avg,
+                    MAX(temp_cpu) as temp_cpu_max,
+                    AVG(temp_gpu) as temp_gpu_avg,
+                    AVG(temp_ssd) as temp_ssd_avg,
+                    AVG(temp_hdd) as temp_hdd_avg,
+                    MIN(timestamp) as desde
+                FROM metrics
+            ''')
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            return jsonify(dict(row))
+        
+        @self.app.route('/api/db-size')
+        def api_db_size():
+            """Tamaño de la BD"""
+            db_path = Path(self.db_file)
+            if db_path.exists():
+                size_mb = db_path.stat().st_size / (1024**2)
+                
+                conn = self.get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM metrics")
+                rows = cursor.fetchone()[0]
+                conn.close()
+                
+                bytes_per_row = (size_mb * 1024 * 1024) / rows if rows > 0 else 0
+                
+                return jsonify({
+                    "size_mb": round(size_mb, 2),
+                    "registros": rows,
+                    "bytes_per_row": round(bytes_per_row, 1)
+                })
+            return jsonify({"error": "BD no encontrada"}), 404
+        
+        @self.app.route('/api/temperatures')
+        def api_temperatures():
+            """Temperaturas completas del último registro"""
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT timestamp, temp_cpu, temp_gpu, temp_ssd, temp_hdd, temperatures
+                FROM metrics ORDER BY timestamp DESC LIMIT 1
+            ''')
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            if not row:
+                return jsonify({"error": "No hay datos"}), 404
+            
+            temps = {
+                "timestamp": row['timestamp'],
+                "cpu": row['temp_cpu'],
+                "gpu": row['temp_gpu'],
+                "ssd": row['temp_ssd'],
+                "hdd": row['temp_hdd'],
+                "all_sensors": json.loads(row['temperatures']) if row['temperatures'] else {}
+            }
+            
+            return jsonify(temps)
+    
+    def run(self, host, port, debug):
+        """Inicia el servidor Flask"""
+        self.app.run(host=host, port=port, debug=debug, use_reloader=False)
+
+def run_flask_server(db_file):
+    """Ejecuta Flask en un thread separado"""
+    dashboard = DashboardServer(db_file)
+    dashboard.run(
+        host=CONFIG["flask_host"],
+        port=CONFIG["flask_port"],
+        debug=CONFIG["flask_debug"]
+    )
+
+def get_db_size_stats():
     """Muestra estadísticas de tamaño de la base de datos"""
     db_file = Path(CONFIG["db_file"])
     if db_file.exists():
@@ -385,7 +675,17 @@ def main():
     print(f"BD SQLite: {monitor.db_file}")
     if CONFIG["log_compression"]:
         print(f"JSON comprimido: {monitor.log_file.with_suffix('.jsonl.gz')}")
+    print(f"🌐 Dashboard: http://{CONFIG['flask_host']}:{CONFIG['flask_port']}")
     print("="*60 + "\n")
+    
+    # Iniciar Flask en thread separado
+    flask_thread = threading.Thread(
+        target=run_flask_server,
+        args=(CONFIG["db_file"],),
+        daemon=True
+    )
+    flask_thread.start()
+    print(f"✅ Servidor Flask iniciado en puerto {CONFIG['flask_port']}\n")
     
     last_update_check = 0
     

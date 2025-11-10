@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hardware Monitor Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+            border-bottom: 2px solid #00ff88;
+            padding-bottom: 20px;
+        }
+        
+        h1 {
+            font-size: 2.5em;
+            color: #00ff88;
+            text-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            color: #888;
+            font-size: 0.9em;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #2a2a3e 0%, #1f1f33 100%);
+            padding: 25px;
+            border-radius: 12px;
+            border-left: 5px solid #00ff88;
+            box-shadow: 0 8px 32px rgba(0, 255, 136, 0.1);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 12px 48px rgba(0, 255, 136, 0.2);
+        }
+        
+        .stat-card h3 {
+            color: #00ff88;
+            font-size: 0.85em;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .stat-card .value {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+        
+        .stat-card .detail {
+            color: #888;
+            font-size: 0.85em;
+            margin-top: 8px;
+        }
+        
+        .charts {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 20px;
+        }
+        
+        .chart-container {
+            background: linear-gradient(135deg, #2a2a3e 0%, #1f1f33 100%);
+            padding: 25px;
+            border-radius: 12px;
+            border: 1px solid rgba(0, 255, 136, 0.2);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            position: relative;
+            min-height: 350px;
+        }
+        
+        .chart-title {
+            font-size: 1.1em;
+            color: #00ff88;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        canvas {
+            max-height: 300px;
+        }
+        
+        .loading {
+            text-align: center;
+            color: #888;
+            padding: 40px;
+            font-size: 1.1em;
+        }
+        
+        .db-info {
+            background: linear-gradient(135deg, #2a2a3e 0%, #1f1f33 100%);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(0, 255, 136, 0.2);
+            margin-top: 20px;
+            font-size: 0.9em;
+            color: #888;
+        }
+        
+        .db-info strong {
+            color: #00ff88;
+        }
+        
+        @media (max-width: 768px) {
+            .charts {
+                grid-template-columns: 1fr;
+            }
+            
+            h1 {
+                font-size: 1.8em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🖥️ Hardware Monitor</h1>
+            <p class="subtitle">Dashboard en tiempo real</p>
+        </header>
+        
+        <div class="stats" id="stats">
+            <div class="loading">Cargando estadísticas...</div>
+        </div>
+        
+        <div class="charts">
+            <div class="chart-container">
+                <div class="chart-title">📊 CPU (%)</div>
+                <canvas id="cpuChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">💾 RAM (%)</div>
+                <canvas id="ramChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">🗄️ DISK (%)</div>
+                <canvas id="diskChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="db-info" id="dbInfo">
+            Cargando información de BD...
+        </div>
+    </div>
+
+    <script>
+        const chartColors = {
+            cpu: 'rgba(255, 107, 107, 1)',
+            cpuBg: 'rgba(255, 107, 107, 0.1)',
+            ram: 'rgba(78, 205, 196, 1)',
+            ramBg: 'rgba(78, 205, 196, 0.1)',
+            disk: 'rgba(255, 230, 109, 1)',
+            diskBg: 'rgba(255, 230, 109, 0.1)'
+        };
+        
+        let charts = {};
+        
+        async function loadData() {
+            try {
+                const [latestData, stats, dbSize] = await Promise.all([
+                    fetch('/api/latest').then(r => r.json()),
+                    fetch('/api/stats').then(r => r.json()),
+                    fetch('/api/db-size').then(r => r.json())
+                ]);
+                
+                updateStats(stats);
+                updateCharts(latestData);
+                updateDbInfo(dbSize);
+                
+            } catch (error) {
+                console.error('Error cargando datos:', error);
+            }
+            
+            setTimeout(loadData, 5000);
+        }
+        
+        function updateStats(stats) {
+            document.getElementById('stats').innerHTML = `
+                <div class="stat-card">
+                    <h3>CPU Promedio</h3>
+                    <div class="value">${stats.cpu_promedio?.toFixed(1) || 'N/A'}%</div>
+                    <div class="detail">🔴 Máximo: ${stats.cpu_maximo?.toFixed(1) || 'N/A'}%</div>
+                </div>
+                <div class="stat-card">
+                    <h3>RAM Promedio</h3>
+                    <div class="value">${stats.ram_promedio?.toFixed(1) || 'N/A'}%</div>
+                    <div class="detail">🔴 Máximo: ${stats.ram_maximo?.toFixed(1) || 'N/A'}%</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Total de Registros</h3>
+                    <div class="value">${stats.total_registros?.toLocaleString() || 0}</div>
+                    <div class="detail">⏰ Desde: ${new Date(stats.desde).toLocaleString()}</div>
+                </div>
+            `;
+        }
+        
+        function updateDbInfo(dbSize) {
+            if (dbSize.error) {
+                document.getElementById('dbInfo').innerHTML = 'Información de BD no disponible';
+                return;
+            }
+            
+            document.getElementById('dbInfo').innerHTML = `
+                <strong>📦 Base de Datos:</strong> ${dbSize.size_mb} MB | 
+                <strong>📊 Registros:</strong> ${dbSize.registros.toLocaleString()} | 
+                <strong>⚖️ Bytes/Registro:</strong> ${dbSize.bytes_per_row}
+            `;
+        }
+        
+        function createOrUpdateChart(canvasId, label, data, labels, color, bgColor) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            
+            if (charts[canvasId]) {
+                charts[canvasId].data.labels = labels;
+                charts[canvasId].data.datasets[0].data = data;
+                charts[canvasId].update('none');
+            } else {
+                charts[canvasId] = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: label,
+                            data: data,
+                            borderColor: color,
+                            backgroundColor: bgColor,
+                            borderWidth: 2,
+                            tension: 0.4,
+                            fill: true,
+                            pointRadius: 0,
+                            pointHoverRadius: 6
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false },
+                            filler: { propagate: true }
+                        },
+                        scales: {
+                            y: {
+                                max: 100,
+                                beginAtZero: true,
+                                ticks: { color: '#888', font: { size: 11 } },
+                                grid: { color: 'rgba(0, 255, 136, 0.05)' }
+                            },
+                            x: {
+                                ticks: { color: '#888', font: { size: 10 }, maxRotation: 45, minRotation: 0 },
+                                grid: { color: 'rgba(0, 255, 136, 0.05)' }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+        
+        function updateCharts(data) {
+            const timestamps = data.map(d => new Date(d.timestamp).toLocaleTimeString());
+            const cpuData = data.map(d => d.cpu_percent);
+            const ramData = data.map(d => d.memory_percent);
+            const diskData = data.map(d => d.disk_percent);
+            
+            createOrUpdateChart('cpuChart', 'CPU %', cpuData, timestamps, chartColors.cpu, chartColors.cpuBg);
+            createOrUpdateChart('ramChart', 'RAM %', ramData, timestamps, chartColors.ram, chartColors.ramBg);
+            createOrUpdateChart('diskChart', 'DISK %', diskData, timestamps, chartColors.disk, chartColors.diskBg);
+        }
+        
+        // Iniciar carga de datos
+        loadData();
+    </script>
+</body>
+</html>
