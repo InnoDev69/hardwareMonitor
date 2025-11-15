@@ -92,7 +92,7 @@
         }
         
         .chart-container {
-            background: linear-gradient(135deg, #2a2a3e 0%, #1f1f33 100%);
+            background: linear-gradient(135deg, #2a2c3e 0%, #1f1f33 100%);
             padding: 25px;
             border-radius: 12px;
             border: 1px solid rgba(0, 255, 136, 0.2);
@@ -121,7 +121,7 @@
         }
         
         .db-info {
-            background: linear-gradient(135deg, #2a2a3e 0%, #1f1f33 100%);
+            background: linear-gradient(135deg, #2a2c3e 0%, #1f1f33 100%);
             padding: 20px;
             border-radius: 12px;
             border: 1px solid rgba(0, 255, 136, 0.2);
@@ -169,6 +169,22 @@
                 <div class="chart-title">🗄️ DISK (%)</div>
                 <canvas id="diskChart"></canvas>
             </div>
+            <div class="chart-container">
+                <div class="chart-title">🌡️ CPU Temp (°C)</div>
+                <canvas id="tempCpuChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">🎮 GPU Temp (°C)</div>
+                <canvas id="tempGpuChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">💿 SSD Temp (°C)</div>
+                <canvas id="tempSsdChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">🖲️ HDD Temp (°C)</div>
+                <canvas id="tempHddChart"></canvas>
+            </div>
         </div>
         
         <div class="db-info" id="dbInfo">
@@ -183,7 +199,15 @@
             ram: 'rgba(78, 205, 196, 1)',
             ramBg: 'rgba(78, 205, 196, 0.1)',
             disk: 'rgba(255, 230, 109, 1)',
-            diskBg: 'rgba(255, 230, 109, 0.1)'
+            diskBg: 'rgba(255, 230, 109, 0.1)',
+            tempCpu: 'rgba(255, 159, 64, 1)',
+            tempCpuBg: 'rgba(255, 159, 64, 0.1)',
+            tempGpu: 'rgba(153, 102, 255, 1)',
+            tempGpuBg: 'rgba(153, 102, 255, 0.1)',
+            tempSsd: 'rgba(75, 192, 192, 1)',
+            tempSsdBg: 'rgba(75, 192, 192, 0.1)',
+            tempHdd: 'rgba(255, 193, 7, 1)',
+            tempHddBg: 'rgba(255, 193, 7, 0.1)'
         };
         
         let charts = {};
@@ -220,6 +244,11 @@
                     <div class="detail">🔴 Máximo: ${stats.ram_maximo?.toFixed(1) || 'N/A'}%</div>
                 </div>
                 <div class="stat-card">
+                    <h3>Temperatura</h3>
+                    <div class="value">${stats.temp_cpu_avg?.toFixed(1) || 'N/A'}°C</div>
+                    <div class="detail">🔴 Máximo: ${stats.temp_cpu_max?.toFixed(1) || 'N/A'}°C</div>
+                </div>
+                <div class="stat-card">
                     <h3>Total de Registros</h3>
                     <div class="value">${stats.total_registros?.toLocaleString() || 0}</div>
                     <div class="detail">⏰ Desde: ${new Date(stats.desde).toLocaleString()}</div>
@@ -240,8 +269,16 @@
             `;
         }
         
-        function createOrUpdateChart(canvasId, label, data, labels, color, bgColor) {
-            const ctx = document.getElementById(canvasId).getContext('2d');
+        function createOrUpdateChart(canvasId, label, data, labels, color, bgColor, maxValue = 100) {
+            const canvas = document.getElementById(canvasId);
+            
+            // Validar que el canvas exista
+            if (!canvas) {
+                console.warn(`Canvas no encontrado: ${canvasId}`);
+                return;
+            }
+            
+            const ctx = canvas.getContext('2d');
             
             if (charts[canvasId]) {
                 charts[canvasId].data.labels = labels;
@@ -273,7 +310,7 @@
                         },
                         scales: {
                             y: {
-                                max: 100,
+                                max: maxValue,
                                 beginAtZero: true,
                                 ticks: { color: '#888', font: { size: 11 } },
                                 grid: { color: 'rgba(0, 255, 136, 0.05)' }
@@ -289,14 +326,27 @@
         }
         
         function updateCharts(data) {
-            const timestamps = data.map(d => new Date(d.timestamp).toLocaleTimeString());
-            const cpuData = data.map(d => d.cpu_percent);
-            const ramData = data.map(d => d.memory_percent);
-            const diskData = data.map(d => d.disk_percent);
+            if (!data || data.length === 0) {
+                console.warn('No hay datos disponibles');
+                return;
+            }
             
-            createOrUpdateChart('cpuChart', 'CPU %', cpuData, timestamps, chartColors.cpu, chartColors.cpuBg);
-            createOrUpdateChart('ramChart', 'RAM %', ramData, timestamps, chartColors.ram, chartColors.ramBg);
-            createOrUpdateChart('diskChart', 'DISK %', diskData, timestamps, chartColors.disk, chartColors.diskBg);
+            const timestamps = data.map(d => new Date(d.timestamp).toLocaleTimeString());
+            const cpuData = data.map(d => d.cpu_percent || 0);
+            const ramData = data.map(d => d.memory_percent || 0);
+            const diskData = data.map(d => d.disk_percent || 0);
+            const tempCpuData = data.map(d => d.temp_cpu || 0);
+            const tempGpuData = data.map(d => d.temp_gpu || 0);
+            const tempSsdData = data.map(d => d.temp_ssd || 0);
+            const tempHddData = data.map(d => d.temp_hdd || 0);
+
+            createOrUpdateChart('cpuChart', 'CPU %', cpuData, timestamps, chartColors.cpu, chartColors.cpuBg, 100);
+            createOrUpdateChart('ramChart', 'RAM %', ramData, timestamps, chartColors.ram, chartColors.ramBg, 100);
+            createOrUpdateChart('diskChart', 'DISK %', diskData, timestamps, chartColors.disk, chartColors.diskBg, 100);
+            createOrUpdateChart('tempCpuChart', 'Temp CPU (°C)', tempCpuData, timestamps, chartColors.tempCpu, chartColors.tempCpuBg, 120);
+            createOrUpdateChart('tempGpuChart', 'Temp GPU (°C)', tempGpuData, timestamps, chartColors.tempGpu, chartColors.tempGpuBg, 100);
+            createOrUpdateChart('tempSsdChart', 'Temp SSD (°C)', tempSsdData, timestamps, chartColors.tempSsd, chartColors.tempSsdBg, 80);
+            createOrUpdateChart('tempHddChart', 'Temp HDD (°C)', tempHddData, timestamps, chartColors.tempHdd, chartColors.tempHddBg, 60);
         }
         
         // Iniciar carga de datos

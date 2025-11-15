@@ -14,25 +14,11 @@ import sqlite3
 import gzip
 import threading
 from flask import Flask, render_template, jsonify
+from config import CONFIG
+from webService import *
 
 # Cargar variables de entorno
 load_dotenv()
-
-# Configuración
-CONFIG = {
-    "github_repo": "InnoDev69/hardwareMonitor",
-    "log_file": "logs/hardware_metrics.txt",
-    "db_file": "logs/hardware_metrics.db",
-    "log_compression": True,
-    "check_updates_interval": 86400,
-    "metrics_interval": 5,
-    "update_timeout": 30,
-    "debug": True,
-    "github_token": os.getenv("GITHUB_TOKEN", ""),
-    "flask_host": "0.0.0.0",
-    "flask_port": 4000,
-    "flask_debug": False
-}
 
 class HardwareMonitor:
     def __init__(self):
@@ -133,25 +119,34 @@ class HardwareMonitor:
                 sensor_name_lower = sensor_name.lower()
                 
                 if sensor_list:
-                    temp_value = sensor_list[0].current
-                    temps["all"][sensor_name] = temp_value
+                    # Tomar la primera temperatura de cada sensor
+                    current_temp = sensor_list[0].current
+                    temps["all"][sensor_name] = current_temp
                     
                     # Clasificar por tipo
-                    if any(x in sensor_name_lower for x in ["cpu", "core", "package"]):
+                    if any(x in sensor_name_lower for x in ["coretemp", "package", "cpu"]):
                         if temps["cpu"] is None:
-                            temps["cpu"] = temp_value
+                            temps["cpu"] = current_temp
+                        else:
+                            temps["cpu"] = max(temps["cpu"], current_temp)
                     
-                    elif any(x in sensor_name_lower for x in ["gpu", "nvidia", "amd", "radeon"]):
+                    elif any(x in sensor_name_lower for x in ["nvidia", "amd", "radeon", "gpu"]):
                         if temps["gpu"] is None:
-                            temps["gpu"] = temp_value
+                            temps["gpu"] = current_temp
+                        else:
+                            temps["gpu"] = max(temps["gpu"], current_temp)
                     
-                    elif any(x in sensor_name_lower for x in ["nvme", "ssd", "m.2", "ata0", "ata1"]):
+                    elif any(x in sensor_name_lower for x in ["nvme", "ssd", "m.2"]):
                         if temps["ssd"] is None:
-                            temps["ssd"] = temp_value
+                            temps["ssd"] = current_temp
+                        else:
+                            temps["ssd"] = max(temps["ssd"], current_temp)
                     
-                    elif any(x in sensor_name_lower for x in ["hdd", "disk", "ata", "sata"]):
+                    elif any(x in sensor_name_lower for x in ["ata", "hdd", "sata"]):
                         if temps["hdd"] is None:
-                            temps["hdd"] = temp_value
+                            temps["hdd"] = current_temp
+                        else:
+                            temps["hdd"] = max(temps["hdd"], current_temp)
         
         except Exception as e:
             if CONFIG["debug"]:
@@ -240,59 +235,65 @@ class HardwareMonitor:
             cursor = conn.cursor()
             
             cursor.execute('''
-                INSERT INTO metrics VALUES (
-                    NULL, ?, 
-                    ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?
-                )
+                INSERT INTO metrics (
+                    timestamp, cpu_percent, cpu_freq, cpu_count, cpu_temp,
+                    memory_percent, memory_used_gb, memory_total_gb, memory_available_gb,
+                    disk_percent, disk_used_gb, disk_total_gb, disk_free_gb,
+                    disk_read_count, disk_write_count, disk_read_bytes, disk_write_bytes,
+                    temp_cpu, temp_gpu, temp_ssd, temp_hdd, temperatures,
+                    network_bytes_sent, network_bytes_recv, network_packets_sent, network_packets_recv,
+                    processes_count, threads_count
+                ) VALUES (?, ?, ?, ?, ?,
+                          ?, ?, ?, ?,
+                          ?, ?, ?, ?,
+                          ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?,
+                          ?, ?)
             ''', (
-                metrics['timestamp'],
-                
-                metrics['cpu']['percent'],
-                metrics['cpu']['freq'],
-                metrics['cpu']['count'],
-                metrics['cpu']['temp'],
-                
-                metrics['memory']['percent'],
-                metrics['memory']['used_gb'],
-                metrics['memory']['total_gb'],
-                metrics['memory']['available_gb'],
-                
-                metrics['disk'].get('percent', 0),
-                metrics['disk'].get('used_gb', 0),
-                metrics['disk'].get('total_gb', 0),
-                metrics['disk'].get('free_gb', 0),
-                metrics['disk'].get('read_count', 0),
-                metrics['disk'].get('write_count', 0),
-                metrics['disk'].get('read_bytes', 0),
-                metrics['disk'].get('write_bytes', 0),
-                
-                metrics['temperatures']['cpu'],
-                metrics['temperatures']['gpu'],
-                metrics['temperatures']['ssd'],
-                metrics['temperatures']['hdd'],
-                json.dumps(metrics['temperatures']['all'], ensure_ascii=False),
-                
-                metrics['network'].get('bytes_sent', 0),
-                metrics['network'].get('bytes_recv', 0),
-                metrics['network'].get('packets_sent', 0),
-                metrics['network'].get('packets_recv', 0),
-                
-                metrics['processes'].get('processes', 0),
-                metrics['processes'].get('threads', 0)
+                metrics["timestamp"],
+                metrics["cpu"]["percent"],
+                metrics["cpu"]["freq"],
+                metrics["cpu"]["count"],
+                metrics["cpu"]["temp"],
+                metrics["memory"]["percent"],
+                metrics["memory"]["used_gb"],
+                metrics["memory"]["total_gb"],
+                metrics["memory"]["available_gb"],
+                metrics["disk"]["percent"],
+                metrics["disk"]["used_gb"],
+                metrics["disk"]["total_gb"],
+                metrics["disk"]["free_gb"],
+                metrics["disk"]["read_count"],
+                metrics["disk"]["write_count"],
+                metrics["disk"]["read_bytes"],
+                metrics["disk"]["write_bytes"],
+                metrics["temperatures"]["cpu"],
+                metrics["temperatures"]["gpu"],
+                metrics["temperatures"]["ssd"],
+                metrics["temperatures"]["hdd"],
+                json.dumps(metrics["temperatures"]["all"]),
+                metrics["network"]["bytes_sent"],
+                metrics["network"]["bytes_recv"],
+                metrics["network"]["packets_sent"],
+                metrics["network"]["packets_recv"],
+                metrics["processes"]["processes"],
+                metrics["processes"]["threads"]
             ))
             
             conn.commit()
             conn.close()
+            
+            if CONFIG["debug"]:
+                print(f"[DB] Métrica guardada: {metrics['timestamp']}")
+    
         except sqlite3.IntegrityError:
-            pass
+            if CONFIG["debug"]:
+                print(f"[DB] Registro duplicado (mismo timestamp)")
+    
         except Exception as e:
             if CONFIG["debug"]:
-                print(f"[ERROR] DB: {e}")
+                print(f"[DB] Error guardando métricas: {e}")
     
     def write_metrics(self):
         """Escribe las métricas (DB + Comprimido)"""
@@ -507,160 +508,6 @@ class GitUpdater:
                 
         except Exception as e:
             self.debug_print(f"❌ Error al descargar: {type(e).__name__}: {e}")
-
-# ════════════════════════════════════════════════════════════════
-# FLASK DASHBOARD
-# ════════════════════════════════════════════════════════════════
-
-class DashboardServer:
-    def __init__(self, db_file):
-        self.db_file = db_file
-        self.app = Flask(__name__, template_folder='templates', static_folder='static')
-        self.setup_routes()
-    
-    def get_db_connection(self):
-        """Crea una conexión a la BD"""
-        conn = sqlite3.connect(self.db_file)
-        conn.row_factory = sqlite3.Row
-        return conn
-    
-    def setup_routes(self):
-        """Configura las rutas de Flask"""
-        
-        @self.app.route('/')
-        def index():
-            return render_template('dashboard.html')
-        
-        @self.app.route('/api/latest')
-        def api_latest():
-            """Últimas 100 métricas para gráficos"""
-            conn = self.get_db_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT timestamp, cpu_percent, memory_percent, disk_percent,
-                       temp_cpu, temp_gpu, temp_ssd, temp_hdd,
-                       network_bytes_sent, network_bytes_recv, processes_count
-                FROM metrics ORDER BY timestamp DESC LIMIT 100
-            ''')
-            
-            rows = cursor.fetchall()
-            conn.close()
-            
-            data = [dict(row) for row in reversed(rows)]
-            return jsonify(data)
-        
-        @self.app.route('/api/stats')
-        def api_stats():
-            """Estadísticas generales"""
-            conn = self.get_db_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT 
-                    COUNT(*) as total_registros,
-                    AVG(cpu_percent) as cpu_promedio,
-                    MAX(cpu_percent) as cpu_maximo,
-                    AVG(memory_percent) as ram_promedio,
-                    MAX(memory_percent) as ram_maximo,
-                    AVG(disk_percent) as disk_promedio,
-                    MAX(disk_percent) as disk_maximo,
-                    AVG(temp_cpu) as temp_cpu_avg,
-                    MAX(temp_cpu) as temp_cpu_max,
-                    AVG(temp_gpu) as temp_gpu_avg,
-                    AVG(temp_ssd) as temp_ssd_avg,
-                    AVG(temp_hdd) as temp_hdd_avg,
-                    MIN(timestamp) as desde
-                FROM metrics
-            ''')
-            
-            row = cursor.fetchone()
-            conn.close()
-            
-            return jsonify(dict(row))
-        
-        @self.app.route('/api/db-size')
-        def api_db_size():
-            """Tamaño de la BD"""
-            db_path = Path(self.db_file)
-            if db_path.exists():
-                size_mb = db_path.stat().st_size / (1024**2)
-                
-                conn = self.get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM metrics")
-                rows = cursor.fetchone()[0]
-                conn.close()
-                
-                bytes_per_row = (size_mb * 1024 * 1024) / rows if rows > 0 else 0
-                
-                return jsonify({
-                    "size_mb": round(size_mb, 2),
-                    "registros": rows,
-                    "bytes_per_row": round(bytes_per_row, 1)
-                })
-            return jsonify({"error": "BD no encontrada"}), 404
-        
-        @self.app.route('/api/temperatures')
-        def api_temperatures():
-            """Temperaturas completas del último registro"""
-            conn = self.get_db_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT timestamp, temp_cpu, temp_gpu, temp_ssd, temp_hdd, temperatures
-                FROM metrics ORDER BY timestamp DESC LIMIT 1
-            ''')
-            
-            row = cursor.fetchone()
-            conn.close()
-            
-            if not row:
-                return jsonify({"error": "No hay datos"}), 404
-            
-            temps = {
-                "timestamp": row['timestamp'],
-                "cpu": row['temp_cpu'],
-                "gpu": row['temp_gpu'],
-                "ssd": row['temp_ssd'],
-                "hdd": row['temp_hdd'],
-                "all_sensors": json.loads(row['temperatures']) if row['temperatures'] else {}
-            }
-            
-            return jsonify(temps)
-    
-    def run(self, host, port, debug):
-        """Inicia el servidor Flask"""
-        self.app.run(host=host, port=port, debug=debug, use_reloader=False)
-
-def run_flask_server(db_file):
-    """Ejecuta Flask en un thread separado"""
-    dashboard = DashboardServer(db_file)
-    dashboard.run(
-        host=CONFIG["flask_host"],
-        port=CONFIG["flask_port"],
-        debug=CONFIG["flask_debug"]
-    )
-
-def get_db_size_stats():
-    """Muestra estadísticas de tamaño de la base de datos"""
-    db_file = Path(CONFIG["db_file"])
-    if db_file.exists():
-        size_mb = db_file.stat().st_size / (1024**2)
-        
-        conn = sqlite3.connect(db_file)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM metrics")
-        rows = cursor.fetchone()[0]
-        conn.close()
-        
-        bytes_per_row = (size_mb * 1024 * 1024) / rows if rows > 0 else 0
-        
-        print(f"\n📊 Estadísticas de BD:")
-        print(f"   Tamaño: {size_mb:.2f} MB")
-        print(f"   Registros: {rows:,}")
-        print(f"   Bytes/registro: {bytes_per_row:.1f}")
-        print(f"   Proyección/mes: {(size_mb/24):.2f} MB (si corre 24h)\n")
 
 def main():
     """Función principal"""
